@@ -1,0 +1,343 @@
+
+#include <WiFiNINA.h>
+#include <PubSubClient.h>
+#include <DHT.h>
+
+// ---------------- WIFI SETTINGS ----------------
+
+char ssid[] = "Oneplus";
+char password[] = "123456789";
+
+// ---------------- MQTT SETTINGS ----------------
+
+const char* mqttServer = "172.22.93.18";
+const int mqttPort = 1883;
+
+// ---------------- SENSOR PINS ----------------
+
+#define MQ135_PIN A0
+
+#define DHT_PIN 4
+#define DHT_TYPE DHT22
+
+#define TRIG_PIN 7
+#define ECHO_PIN 8
+
+#define RELAY_PIN 2
+
+// ---------------- SENSOR OBJECTS ----------------
+
+WiFiClient wifiClient;
+PubSubClient mqttClient(wifiClient);
+
+DHT dht(DHT_PIN, DHT_TYPE);
+
+// ---------------- FAN SETTINGS ----------------
+
+bool fanState = false;
+
+bool previousMotionDetected = false;
+
+unsigned long lastDetectionTime = 0;
+
+const unsigned long detectionCooldown = 2000;
+
+// ---------------- SENSOR TIMING ----------------
+
+unsigned long lastSensorTime = 0;
+
+const unsigned long sensorInterval = 2000;
+
+// ---------------- MQTT TOPICS ----------------
+
+const char* mqTopic = "smartair/mq135";
+const char* temperatureTopic = "smartair/temperature";
+const char* humidityTopic = "smartair/humidity";
+const char* distanceTopic = "smartair/distance";
+const char* motionTopic = "smartair/motion";
+const char* fanControlTopic = "smartair/fan/control";
+const char* fanStatusTopic = "smartair/fan/status";
+
+// ---------------- FAN CONTROL ----------------
+
+void setFan(bool state) {
+
+  fanState = state;
+
+  // This assumes your relay is active-HIGH.
+  digitalWrite(RELAY_PIN, fanState ? HIGH : LOW);
+
+  if (mqttClient.connected()) {
+
+    if (fanState) {
+      mqttClient.publish(fanStatusTopic, "ON", true);
+      Serial.println("Fan switched ON");
+    } else {
+      mqttClient.publish(fanStatusTopic, "OFF", true);
+      Serial.println("Fan switched OFF");
+    }
+  }
+}
+
+// ---------------- WIFI CONNECTION ----------------
+
+void connectWiFi() {
+
+  Serial.print("Connecting to WiFi");
+
+  while (WiFi.status() != WL_CONNECTED) {
+
+    WiFi.begin(ssid, password);
+
+    delay(5000);
+
+    Serial.print(".");
+  }
+
+  Serial.println();
+  Serial.println("WiFi connected!");
+
+  Serial.print("Arduino IP: ");
+  Serial.println(WiFi.localIP());
+}
+
+// ---------------- ULTRASONIC SENSOR ----------------
+
+float getDistance() {
+
+  digitalWrite(TRIG_PIN, LOW);
+  delayMicroseconds(2);
+
+  digitalWrite(TRIG_PIN, HIGH);
+  delayMicroseconds(10);
+
+  digitalWrite(TRIG_PIN, LOW);
+
+  unsigned long duration = pulseIn(ECHO_PIN, HIGH, 30000);
+
+  if (duration == 0) {
+    return -1;
+  }
+
+  float distance = duration * 0.0343 / 2;
+
+  return distance;
+}
+
+// ---------------- MOTION DETECTION ----------------
+
+void checkMotion(float distance) {
+
+  bool motionDetected = false;
+
+  // Detect objects between 2 cm and 15 cm.
+  if (distance >= 2 && distance <= 15) {
+    motionDetected = true;
+  }
+
+  // Check for a new detection event.
+  if (motionDetected &&
+      !previousMotionDetected &&
+      millis() - lastDetectionTime >= detectionCooldown) {
+
+    Serial.println("Motion detected!");
+
+    // Toggle the fan state.
+    fanState = !fanState;
+
+    setFan(fanState);
+
+    lastDetectionTime = millis();
+  }
+
+  previousMotionDetected = motionDetected;
+
+  // Send YES or NO to the dashboard.
+  if (mqttClient.connected()) {
+
+    if (motionDetected) {
+      mqttClient.publish(motionTopic, "YES");
+    } else {
+      mqttClient.publish(motionTopic, "NO");
+    }
+  }
+}
+
+// ---------------- MQTT MESSAGE CALLBACK ----------------
+
+void callback(char* topic, byte* payload, unsigned int length) {
+
+  String message = "";
+
+  for (unsigned int i = 0; i < length; i++) {
+    message += (char)payload[i];
+  }
+
+  Serial.print("Received command: ");
+  Serial.println(message);
+
+  if (String(topic) == fanControlTopic) {
+
+    if (message == "ON") {
+      setFan(true);
+    }
+
+    else if (message == "OFF") {
+      setFan(false);
+    }
+  }
+}
+
+// ---------------- MQTT CONNECTION ----------------
+
+void connectMQTT() {
+
+  while (!mqttClient.connected()) {
+
+    Serial.print("Connecting to MQTT...");
+
+    String clientId = "AirSense-";
+    clientId += String(random(0xffff), HEX);
+
+    if (mqttClient.connect(clientId.c_str())) {
+
+      Serial.println("Connected!");
+
+      mqttClient.subscribe(fanControlTopic);
+
+      // Send the current fan status after reconnecting.
+      if (fanState) {
+        mqttClient.publish(fanStatusTopic, "ON", true);
+      } else {
+        mqttClient.publish(fanStatusTopic, "OFF", true);
+      }
+    }
+
+    else {
+
+      Serial.print("Failed. State: ");
+      Serial.println(mqttClient.state());
+
+      delay(3000);
+    }
+  }
+}
+
+// ---------------- SETUP ----------------
+
+void setup() {
+
+  Serial.begin(9600);
+
+  pinMode(TRIG_PIN, OUTPUT);
+  pinMode(ECHO_PIN, INPUT);
+
+  pinMode(RELAY_PIN, OUTPUT);
+
+  // Start with the fan OFF.
+  digitalWrite(RELAY_PIN, LOW);
+  fanState = false;
+
+  dht.begin();
+
+  connectWiFi();
+
+  mqttClient.setServer(mqttServer, mqttPort);
+  mqttClient.setCallback(callback);
+
+  connectMQTT();
+
+  Serial.println("AirSense system started!");
+}
+
+// ---------------- MAIN LOOP ----------------
+
+void loop() {
+
+  if (WiFi.status() != WL_CONNECTED) {
+    connectWiFi();
+  }
+
+  if (!mqttClient.connected()) {
+    connectMQTT();
+  }
+
+  mqttClient.loop();
+
+  // Read sensors every two seconds.
+  if (millis() - lastSensorTime >= sensorInterval) {
+
+    lastSensorTime = millis();
+
+    // Read MQ135.
+    int airQuality = analogRead(MQ135_PIN);
+
+    // Read DHT22.
+    float temperature = dht.readTemperature();
+    float humidity = dht.readHumidity();
+
+    // Read ultrasonic sensor.
+    float distance = getDistance();
+
+    // Publish MQ135 reading.
+    mqttClient.publish(
+      mqTopic,
+      String(airQuality).c_str()
+    );
+
+    // Publish temperature.
+    if (!isnan(temperature)) {
+
+      mqttClient.publish(
+        temperatureTopic,
+        String(temperature, 1).c_str()
+      );
+    }
+
+    // Publish humidity.
+    if (!isnan(humidity)) {
+
+      mqttClient.publish(
+        humidityTopic,
+        String(humidity, 1).c_str()
+      );
+    }
+
+    // Publish distance.
+    if (distance >= 0) {
+
+      mqttClient.publish(
+        distanceTopic,
+        String(distance, 1).c_str()
+      );
+    }
+
+    // Check motion and toggle the fan if necessary.
+    checkMotion(distance);
+
+    // Serial monitor output.
+    Serial.println("----------------------");
+
+    Serial.print("MQ135: ");
+    Serial.println(airQuality);
+
+    Serial.print("Temperature: ");
+    Serial.println(temperature);
+
+    Serial.print("Humidity: ");
+    Serial.println(humidity);
+
+    Serial.print("Distance: ");
+    Serial.println(distance);
+
+    Serial.print("Motion: ");
+    Serial.println(
+      (distance >= 2 && distance <= 15) ? "YES" : "NO"
+    );
+
+    Serial.print("Fan: ");
+    Serial.println(fanState ? "ON" : "OFF");
+
+    Serial.println("----------------------");
+  }
+}
