@@ -1,0 +1,26 @@
+# Python
+venv/
+__pycache__/
+*.pyc
+
+# Node modules
+node_modules/
+
+# Environment variables and secrets
+.env
+.env.*
+!.env.example
+
+# Build files
+dist/
+build/
+
+# Logs
+*.log
+npm-debug.log*
+
+# Operating system
+.DS_Store
+
+# Temporary files
+.lgd-nfy0
